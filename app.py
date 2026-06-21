@@ -26,6 +26,14 @@ if "db_connection_type" not in st.session_state:
     st.session_state.connection_string = None
     st.session_state.db = None
 
+# Initialize query history
+if "query_history" not in st.session_state:
+    st.session_state.query_history = []
+
+# Pre-fill query from history selection
+if "prefill_query" not in st.session_state:
+    st.session_state.prefill_query = ""
+
 # Get the database instance
 if st.session_state.db is None:
     st.session_state.db = initialize_database()
@@ -260,8 +268,18 @@ with st.sidebar:
     understand your data better.
     """)
 
+    # Query history
+    if st.session_state.query_history:
+        st.divider()
+        st.subheader("Query History")
+        for i, past_query in enumerate(reversed(st.session_state.query_history)):
+            if st.button(past_query, key=f"history_{i}", use_container_width=True):
+                st.session_state.prefill_query = past_query
+                st.rerun()
+
 # Main input area
 query_input = st.text_area("Ask a question about your data", height=100, 
+                         value=st.session_state.prefill_query,
                          placeholder="e.g., 'Show me the top 5 products by sales' or 'What departments have the highest average salary?'")
 
 # Tone selection
@@ -272,6 +290,12 @@ submit_button = st.button("Get Insights", type="primary")
 
 # Process the query when submit button is clicked
 if submit_button and query_input:
+    # Save query to history (avoid duplicates at the top)
+    if query_input not in st.session_state.query_history:
+        st.session_state.query_history.append(query_input)
+    # Clear the prefill so the text area doesn't re-populate on next run
+    st.session_state.prefill_query = ""
+
     # Check if Mistral API key is available
     mistral_service = get_mistral_service()
     if not mistral_service:
@@ -290,13 +314,22 @@ if submit_button and query_input:
                 if error:
                     st.error(f"Error generating SQL query: {error}")
                 else:
-                    # Display the generated SQL in a collapsible expander
-                    with st.expander("View Generated SQL Query", expanded=False):
-                        st.code(sql_query, language="sql")
-                    
+                    # Allow the user to review and edit the generated SQL
+                    st.subheader("Generated SQL Query")
+                    edited_sql = st.text_area(
+                        "You can edit the SQL below before running it:",
+                        value=sql_query,
+                        height=120,
+                        key="edited_sql"
+                    )
+                    run_sql_button = st.button("Run SQL", type="secondary")
+
+                    # Execute either immediately (first render) or after user clicks Run SQL
+                    sql_to_run = edited_sql if run_sql_button else sql_query
+
                     # Execute the query
                     try:
-                        results_df = db.execute_query(sql_query)
+                        results_df = db.execute_query(sql_to_run)
                         
                         if results_df is not None and not results_df.empty:
                             # Analyze the results
@@ -305,7 +338,7 @@ if submit_button and query_input:
                             # Generate narrative insights
                             narrative = mistral_service.generate_narrative(
                                 query_input, 
-                                sql_query, 
+                                sql_to_run, 
                                 results_df, 
                                 analysis, 
                                 tone.lower()
@@ -322,6 +355,15 @@ if submit_button and query_input:
                                 # Display data table
                                 st.subheader("Data")
                                 st.dataframe(results_df)
+
+                                # CSV export
+                                csv_data = results_df.to_csv(index=False).encode("utf-8")
+                                st.download_button(
+                                    label="⬇ Download results as CSV",
+                                    data=csv_data,
+                                    file_name="query_results.csv",
+                                    mime="text/csv"
+                                )
                             
                             with col2:
                                 # Create and display visualization
